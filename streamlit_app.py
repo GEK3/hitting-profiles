@@ -53,7 +53,7 @@ def style_table(display_df, pct_df):
 
 def main():
     st.title("⚾ Hitting Profiles")
-    st.markdown('<p class="subtitle">Plate discipline & damage metrics — SEAGER framework</p>', unsafe_allow_html=True)
+    st.markdown('<p class="subtitle">Plate discipline & damage metrics</p>', unsafe_allow_html=True)
     df_raw = load_data()
     p = Path(__file__).parent / "data" / "leaderboard.csv"
     if p.exists():
