@@ -27,7 +27,7 @@ def pct_rank(df_full, df_sub):
     out = df_sub[["Name","Team"]].copy()
     if "PA" in df_sub.columns: out["PA"] = df_sub["PA"]
     for col in METRIC_COLS:
-        if col not in df_full.columns: continue
+        if col not in df_full.columns or col not in df_sub.columns: continue
         series = df_full[col].dropna()
         lower = col in LOWER_BETTER
         out[col] = df_sub[col].apply(lambda v: np.nan if pd.isna(v) else float(np.mean(series>v)*100) if lower else float(np.mean(series<v)*100))
@@ -119,7 +119,44 @@ def main():
     else:
         pct_style = pct_rank(df_raw, df_disp)
 
-    st.dataframe(style_table(df_disp, pct_style), use_container_width=True, height=650, hide_index=True, key=f"{sort_col}_{sort_dir}_{len(df_disp)}")
+    # Build HTML table to avoid Streamlit string-sort bug
+    fmt = df_disp.copy()
+    for col in METRIC_COLS:
+        if col in fmt.columns:
+            fmt[col] = fmt[col].apply(lambda v: round(v,1) if pd.notna(v) else None)
+    fmt = fmt.rename(columns=COL_LABELS)
+
+    pct_vals = {}
+    for col in METRIC_COLS:
+        dc = COL_LABELS.get(col,col)
+        if col in pct_style.columns and dc in fmt.columns and col in df_disp.columns:
+            pct_vals[dc] = list(pct_style[col].values)
+
+    def pct_color(pct):
+        if pct is None or (isinstance(pct,float) and np.isnan(pct)): return ""
+        p = max(0,min(100,pct))/100
+        if p < 0.5:
+            t=p*2; r,g,b=int(220-t*70),int(50+t*150),50
+        else:
+            t=(p-0.5)*2; r,g,b=int(150-t*100),int(200+t*30),50
+        return f"background-color:rgba({r},{g},{b},0.55)"
+
+    header = "".join(f"<th style='padding:6px 10px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid #444;white-space:nowrap;background:#1a1a1a'>{c}</th>" for c in fmt.columns)
+    rows = []
+    for row_i, (_, row) in enumerate(fmt.iterrows()):
+        cells = ""
+        for c in fmt.columns:
+            val = row[c]
+            color = pct_color(pct_vals[c][row_i]) if c in pct_vals and row_i < len(pct_vals[c]) else ""
+            align = "left" if c in ["Name","Team","Position"] else "right"
+            fw = "600" if c=="Name" else "400"
+            display = "-" if val is None or (isinstance(val,float) and np.isnan(val)) else val
+            cells += f"<td style='padding:5px 10px;font-size:12px;text-align:{align};font-weight:{fw};{color};white-space:nowrap'>{display}</td>"
+        bg = "#161616" if row_i%2==0 else "#1c1c1c"
+        rows.append(f"<tr style='background:{bg}'>{cells}</tr>")
+
+    html = f"<div style='overflow:auto;max-height:650px;border:1px solid #333;border-radius:8px'><table style='border-collapse:collapse;width:100%'><thead><tr>{header}</tr></thead><tbody>{''.join(rows)}</tbody></table></div>"
+    st.html(html)
 
     with st.expander("Metric definitions"):
         for col,desc in COL_HELP.items():
