@@ -86,46 +86,86 @@ def compute_damage_and_pulled_fb(batted):
 
 def compute_seager(pitches):
     p = pitches.dropna(subset=["plate_x","plate_z","balls","strikes","delta_run_exp"]).copy()
-    p["px_bin"] = pd.cut(p["plate_x"], bins=np.linspace(-2,2,13), labels=False)
-    p["pz_bin"] = pd.cut(p["plate_z"], bins=np.linspace(0,5,13), labels=False)
+
     swing_desc = {"hit_into_play","swinging_strike","swinging_strike_blocked","foul","foul_tip","foul_bunt","missed_bunt"}
     take_desc = {"called_strike","ball","blocked_ball","pitchout","hit_by_pitch"}
     p["is_swing"] = p["description"].isin(swing_desc)
     p["is_take"] = p["description"].isin(take_desc)
-    p["in_zone"] = (p["plate_x"].abs() < 0.83) & p["plate_z"].between(1.5, 3.5)
+    p = p[p["is_swing"] | p["is_take"]].copy()
+
+    # Bin location into grid for run value lookup
+    p["px_bin"] = pd.cut(p["plate_x"], bins=np.linspace(-2,2,13), labels=False)
+    p["pz_bin"] = pd.cut(p["plate_z"], bins=np.linspace(0,5,13), labels=False)
     key = ["balls","strikes","px_bin","pz_bin"]
-    swing_rv = p[p["is_swing"]].groupby(key)["delta_run_exp"].mean().reset_index().rename(columns={"delta_run_exp":"swing_rv"})
-    take_rv = p[p["is_take"]].groupby(key)["delta_run_exp"].mean().reset_index().rename(columns={"delta_run_exp":"take_rv"})
-    p = p.merge(swing_rv, on=key, how="left").merge(take_rv, on=key, how="left")
+
+    # Compute LEAGUE-WIDE average run value of swings and takes
+    # at each count+location bucket - this is the baseline
+    swing_rv = (p[p["is_swing"]].groupby(key)["delta_run_exp"]
+                .mean().reset_index().rename(columns={"delta_run_exp":"swing_rv"}))
+    take_rv = (p[p["is_take"]].groupby(key)["delta_run_exp"]
+               .mean().reset_index().rename(columns={"delta_run_exp":"take_rv"}))
+
+    p = p.merge(swing_rv, on=key, how="left")
+    p = p.merge(take_rv, on=key, how="left")
     p["swing_rv"] = p["swing_rv"].fillna(0)
     p["take_rv"] = p["take_rv"].fillna(0)
-    p["ev_delta"] = p["swing_rv"] - p["take_rv"]
-    p["should_swing"] = p["ev_delta"] > 0
+
+    # A pitch is "hittable" (positive EV to swing) when swing_rv > take_rv
+    p["should_swing"] = p["swing_rv"] > p["take_rv"]
+
     def calc(g):
-        sw = g[g["is_swing"]]; tk = g[g["is_take"]]
-        good_sw = sw["should_swing"].sum()
-        good_tk = (~tk["should_swing"]).sum()
-        gd = good_sw + good_tk
-        hit_taken = tk["should_swing"].sum()
-        tot_tk = len(tk)
-        sel = good_tk/gd if gd>0 else np.nan
-        hpt = hit_taken/tot_tk if tot_tk>0 else np.nan
-        seager = sel-hpt if pd.notna(sel) and pd.notna(hpt) else np.nan
-        o_sw = g[g["is_swing"] & ~g["in_zone"]]
-        o_all = g[~g["in_zone"]]
-        chase = len(o_sw)/len(o_all) if len(o_all)>0 else np.nan
-        z_sw = g[g["is_swing"] & g["in_zone"]]
-        z_contact = (z_sw["description"].isin({"hit_into_play","foul","foul_tip"}).sum()/len(z_sw) if len(z_sw)>0 else np.nan)
+        sw = g[g["is_swing"]]
+        tk = g[g["is_take"]]
+        if len(sw) == 0 or len(tk) == 0:
+            return pd.Series({
+                "SEAGER": np.nan, "Selectivity (%)": np.nan,
+                "Hittable Pitch Take (%)": np.nan, "Chase (%)": np.nan,
+                "Z-Contact (%)": np.nan, "Zone (%)": np.nan, "Z-Swing (%)": np.nan,
+            })
+
+        # Good decisions: hittable swings (A) + unhittable takes (D)
+        good_swings = sw["should_swing"].sum()          # A: swung at hittable pitch
+        good_takes = (~tk["should_swing"]).sum()         # D: took unhittable pitch
+        good_decisions = good_swings + good_takes
+
+        # Hittable pitches taken: took a pitch you should have swung at (C)
+        hittable_taken = tk["should_swing"].sum()        # C: took hittable pitch
+        total_takes = len(tk)
+
+        # Selection Tendency = Good Takes / Good Decisions = D / (A+D)
+        sel = good_takes / good_decisions if good_decisions > 0 else np.nan
+        # Hittable Pitch Take = C / (C+D) = hittable takes / all takes
+        hpt = hittable_taken / total_takes if total_takes > 0 else np.nan
+        # SEAGER = Selection Tendency - Hittable Pitch Take
+        seager = sel - hpt if pd.notna(sel) and pd.notna(hpt) else np.nan
+
+        # Zone metrics using Statcast zone field (1-9 = in zone)
+        in_zone = g["zone"].between(1, 9) if "zone" in g.columns else (g["plate_x"].abs() < 0.83) & g["plate_z"].between(1.5, 3.5)
+        z_pitches = g[in_zone]
+        z_swings = g[in_zone & g["is_swing"]]
+        ooz_swings = g[~in_zone & g["is_swing"]]
+        ooz_pitches = g[~in_zone]
+
+        chase = len(ooz_swings) / len(ooz_pitches) if len(ooz_pitches) > 0 else np.nan
+        z_swing_rate = len(z_swings) / len(z_pitches) if len(z_pitches) > 0 else np.nan
+        zone_pct = len(z_pitches) / len(g) if len(g) > 0 else np.nan
+
+        z_contact_events = {"hit_into_play","foul","foul_tip"}
+        z_contact = (z_swings["description"].isin(z_contact_events).sum() / len(z_swings)
+                     if len(z_swings) > 0 else np.nan)
+
         return pd.Series({
-            "SEAGER": round(seager*100,1) if pd.notna(seager) else np.nan,
-            "Selectivity (%)": round(sel*100,1) if pd.notna(sel) else np.nan,
-            "Hittable Pitch Take (%)": round(hpt*100,1) if pd.notna(hpt) else np.nan,
-            "Chase (%)": round(chase*100,1) if pd.notna(chase) else np.nan,
-            "Z-Contact (%)": round(z_contact*100,1) if pd.notna(z_contact) else np.nan,
-            "Zone (%)": round(g["in_zone"].mean()*100,1),
-            "Z-Swing (%)": round(len(z_sw)/g["in_zone"].sum()*100,1) if g["in_zone"].sum()>0 else np.nan,
+            "SEAGER":                  round(seager * 100, 1) if pd.notna(seager) else np.nan,
+            "Selectivity (%)":         round(sel * 100, 1)    if pd.notna(sel)    else np.nan,
+            "Hittable Pitch Take (%)": round(hpt * 100, 1)    if pd.notna(hpt)    else np.nan,
+            "Chase (%)":               round(chase * 100, 1)  if pd.notna(chase)  else np.nan,
+            "Z-Contact (%)":           round(z_contact * 100, 1) if pd.notna(z_contact) else np.nan,
+            "Zone (%)":                round(zone_pct * 100, 1)  if pd.notna(zone_pct)  else np.nan,
+            "Z-Swing (%)":             round(z_swing_rate * 100, 1) if pd.notna(z_swing_rate) else np.nan,
         })
+
     return p.groupby("batter").apply(calc).reset_index()
+
 
 def compute_whiff_sec(pitches):
     secondary = {"SL","CU","KC","SV","ST","CUO","SLO","CH","FS","FO","SC","CS"}
